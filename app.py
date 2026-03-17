@@ -30,6 +30,11 @@ from data_store import (
     analyze_day_of_week_pattern, analyze_monthly_pattern,
     analyze_intraday_pattern, analyze_time_snapshot_pattern,
 )
+from auth import (
+    sign_up, sign_in, sign_out, get_current_user, is_authenticated,
+    get_subscription, check_feature, check_stock_limit, show_upgrade_prompt,
+)
+from payment import handle_payment_callback, render_pricing_page
 
 # --- 페이지 설정 ---
 st.set_page_config(
@@ -70,7 +75,7 @@ p, li, td, th, span, label, div, input, textarea, select, button {
 """, unsafe_allow_html=True)
 
 # =============================================================
-# 인증 (로그인 벽)
+# 인증 (Supabase Auth 기반)
 # =============================================================
 
 def _sanitize_html(text: str) -> str:
@@ -86,72 +91,124 @@ def _safe_markdown(text: str, **kwargs):
     st.markdown(sanitized, **kwargs)
 
 
-# 로그인 시도 제한용
-if "login_attempts" not in st.session_state:
-    st.session_state.login_attempts = 0
-if "login_locked_until" not in st.session_state:
-    st.session_state.login_locked_until = None
-
 # Gemini API 호출 제한 추적
 if "gemini_call_times" not in st.session_state:
-    st.session_state.gemini_call_times = []  # 최근 호출 타임스탬프 목록
+    st.session_state.gemini_call_times = []
 
 
-def check_auth() -> bool:
-    """아이디/비밀번호 기반 인증 (brute-force 방어 포함)"""
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
+def render_auth_page():
+    """로그인/회원가입 페이지 렌더링"""
+    st.markdown("""
+    <div style="text-align:center; padding:40px 0 20px;">
+        <h1 style="color:#00c878; margin-bottom:8px;">오크밸리</h1>
+        <p style="color:#888; font-size:1.1em;">주식 분석 & 포트폴리오</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if st.session_state.authenticated:
-        return True
-
-    st.markdown("## Stock Memory")
-    st.markdown("접근 권한이 필요합니다.")
-
-    # brute-force 잠금 체크
-    if st.session_state.login_locked_until:
-        remaining = (st.session_state.login_locked_until - datetime.now()).total_seconds()
-        if remaining > 0:
-            st.error(f"로그인 시도 초과. {int(remaining)}초 후 다시 시도해주세요.")
-            return False
+    # 결제 콜백 처리
+    payment_result = handle_payment_callback()
+    if payment_result:
+        if payment_result["success"]:
+            from auth import activate_premium
+            user = get_current_user()
+            if user:
+                activate_premium(
+                    user["id"],
+                    payment_result["payment_key"],
+                    payment_result["order_id"],
+                    payment_result["amount"],
+                )
+                st.success("결제가 완료되었습니다! 프리미엄이 활성화됩니다.")
+                st.rerun()
         else:
-            st.session_state.login_locked_until = None
-            st.session_state.login_attempts = 0
+            st.error(payment_result.get("message", "결제에 실패했습니다."))
 
-    correct_id = st.secrets.get("APP_USERNAME", "")
-    correct_pw = st.secrets.get("APP_PASSWORD", "")
+    tab_login, tab_signup = st.tabs(["로그인", "회원가입"])
 
-    if not correct_id or not correct_pw:
-        st.error("secrets.toml에 APP_USERNAME/APP_PASSWORD를 설정해주세요.")
-        return False
-
-    username = st.text_input("아이디")
-    password = st.text_input("비밀번호", type="password")
-    if st.button("로그인", type="primary"):
-        # 상수 시간 비교 (타이밍 공격 방어)
-        id_match = hmac.compare_digest(username, correct_id)
-        pw_match = hmac.compare_digest(password, correct_pw)
-
-        if id_match and pw_match:
-            st.session_state.authenticated = True
-            st.session_state.login_attempts = 0
-            st.rerun()
-        else:
-            st.session_state.login_attempts += 1
-            remaining = 5 - st.session_state.login_attempts
-            if st.session_state.login_attempts >= 5:
-                st.session_state.login_locked_until = datetime.now() + timedelta(minutes=5)
-                st.error("5회 실패. 5분간 잠금됩니다.")
+    with tab_login:
+        email = st.text_input("이메일", key="login_email", placeholder="example@email.com")
+        password = st.text_input("비밀번호", type="password", key="login_pw")
+        if st.button("로그인", type="primary", key="btn_login", use_container_width=True):
+            if not email or not password:
+                st.error("이메일과 비밀번호를 입력해주세요.")
             else:
-                st.error(f"아이디 또는 비밀번호가 틀렸습니다. (남은 시도: {remaining}회)")
+                result = sign_in(email, password)
+                if result["success"]:
+                    st.rerun()
+                else:
+                    st.error(result["message"])
 
-    st.caption("© 2026 donghapro. All Rights Reserved. 무단 복제 및 배포를 금지합니다.")
-    return False
+    with tab_signup:
+        st.markdown("""
+        <div style="background:#1a2332; border-radius:8px; padding:16px; margin-bottom:16px;">
+            <p style="color:#00c878; margin:0;">회원가입 시 <b>7일 무료 체험</b>이 자동 시작됩니다.</p>
+            <p style="color:#888; margin:4px 0 0; font-size:0.9em;">모든 프리미엄 기능을 7일간 무료로 사용해보세요.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        new_email = st.text_input("이메일", key="signup_email", placeholder="example@email.com")
+        new_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_pw")
+        new_password2 = st.text_input("비밀번호 확인", type="password", key="signup_pw2")
+
+        if st.button("회원가입", type="primary", key="btn_signup", use_container_width=True):
+            if not new_email or not new_password:
+                st.error("이메일과 비밀번호를 입력해주세요.")
+            elif new_password != new_password2:
+                st.error("비밀번호가 일치하지 않습니다.")
+            elif len(new_password) < 6:
+                st.error("비밀번호는 6자 이상이어야 합니다.")
+            else:
+                result = sign_up(new_email, new_password)
+                if result["success"]:
+                    st.success(result["message"])
+                else:
+                    st.error(result["message"])
+
+    st.caption("© 2026 donghapro. All Rights Reserved.")
 
 
-# --- 인증 체크 (로컬 개발 중 비활성화) ---
-# if not check_auth():
-#     st.stop()
+# --- 인증 체크 ---
+if not is_authenticated():
+    render_auth_page()
+    st.stop()
+
+# --- 사용자 정보 사이드바 ---
+user = get_current_user()
+sub = get_subscription()
+
+with st.sidebar:
+    st.markdown(f"**{user['email']}**")
+
+    # 플랜 배지
+    plan_labels = {"trial": "7일 무료 체험", "premium": "프리미엄", "free": "무료"}
+    plan_colors = {"trial": "#ffaa00", "premium": "#3182f6", "free": "#888"}
+    plan = sub["plan"]
+    st.markdown(
+        f"<span style='background:{plan_colors.get(plan, '#888')};color:white;"
+        f"padding:2px 10px;border-radius:4px;font-size:0.85em;'>"
+        f"{plan_labels.get(plan, plan)}</span>",
+        unsafe_allow_html=True,
+    )
+
+    if plan == "trial" and sub["trial_remaining"] > 0:
+        st.caption(f"체험 남은 기간: {sub['trial_remaining']}일")
+    elif plan == "free":
+        if st.button("프리미엄 업그레이드", key="sidebar_upgrade", use_container_width=True):
+            st.session_state.show_pricing = True
+
+    st.divider()
+
+    if st.button("로그아웃", key="btn_logout", use_container_width=True):
+        sign_out()
+        st.rerun()
+
+# --- 요금제 페이지 ---
+if st.session_state.get("show_pricing"):
+    render_pricing_page(user["email"])
+    if st.button("돌아가기"):
+        st.session_state.show_pricing = False
+        st.rerun()
+    st.stop()
 
 # --- 세션 스테이트 초기화 ---
 if "portfolio" not in st.session_state:
@@ -1951,6 +2008,10 @@ def main():
 
         if st.button("📊 분석 시작", type="primary", use_container_width=True):
             portfolio = edited_df.to_dict("records")
+            valid_count = sum(1 for p in portfolio if str(p.get("ticker", "")).strip() and int(p.get("quantity", 0)) > 0)
+            if not check_stock_limit(valid_count):
+                st.warning(f"무료 플랜은 **{1}종목**까지 분석 가능합니다. 프리미엄으로 업그레이드하세요.")
+                st.stop()
             st.session_state.portfolio = portfolio
 
             with st.spinner("주가 데이터 수집 및 분석 중..."):
@@ -2123,13 +2184,19 @@ def main():
                     render_news(result)
 
                 with tab5:
-                    render_strategy(result)
+                    if check_feature("strategy_signals"):
+                        render_strategy(result)
+                    else:
+                        show_upgrade_prompt("전략/스코어 분석")
 
                 with tab6:
                     render_chart(result)
 
                 with tab7:
-                    render_pattern(result)
+                    if check_feature("pattern_analysis"):
+                        render_pattern(result)
+                    else:
+                        show_upgrade_prompt("패턴 분석")
 
                 # 매매일지 기록 버튼
                 jcol1, jcol2, jcol3 = st.columns([1, 1, 3])
@@ -2144,19 +2211,24 @@ def main():
 
         # --- AI 종합 리포트 ---
         st.markdown("---")
-        if st.button("📝 AI 종합 리포트 생성", use_container_width=True):
-            with st.spinner("AI가 전 종목 분석 리포트를 작성 중입니다..."):
-                context = build_ai_context(st.session_state.analysis_results)
-                report = generate_ai_report(context)
-                if report:
-                    st.session_state["ai_report"] = report
+        if check_feature("ai_diagnosis"):
+            if st.button("📝 AI 종합 리포트 생성", use_container_width=True):
+                with st.spinner("AI가 전 종목 분석 리포트를 작성 중입니다..."):
+                    context = build_ai_context(st.session_state.analysis_results)
+                    report = generate_ai_report(context)
+                    if report:
+                        st.session_state["ai_report"] = report
 
-        if st.session_state.get("ai_report"):
-            with st.expander("📋 AI 종합 리포트", expanded=True):
-                st.markdown(st.session_state["ai_report"])
+            if st.session_state.get("ai_report"):
+                with st.expander("📋 AI 종합 리포트", expanded=True):
+                    st.markdown(st.session_state["ai_report"])
+        else:
+            show_upgrade_prompt("AI 종합 리포트")
 
         # --- 분석 데이터 내보내기 ---
         st.markdown("---")
+        if not check_feature("export_data"):
+            show_upgrade_prompt("데이터 내보내기")
         exp_col1, exp_col2 = st.columns(2)
         with exp_col1:
             if st.button("📥 AI 분석용 데이터 내보내기 (JSON)", use_container_width=True):
