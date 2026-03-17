@@ -1,0 +1,31 @@
+# Secrets (절대 커밋하지 않음)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 매매일지 (개인 데이터)
+trading_journal.json
+
+# Google Cloud 서비스 계정 키
+okproject-*.json
+
+# DB
+*.db
+
+# macOS
+.DS_Store
+
+# Claude
+.claude/
+
+# venv
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp

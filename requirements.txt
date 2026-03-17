@@ -1,0 +1,10 @@
+streamlit>=1.30.0
+pykrx>=1.2.0
+gspread>=6.0.0
+google-auth>=2.0.0
+pandas>=2.0.0
+plotly>=5.0.0
+google-genai>=1.0.0
+google-generativeai>=0.8.0
+yfinance>=0.2.0
+supabase>=2.0.0
